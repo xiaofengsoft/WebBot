@@ -8,20 +8,17 @@
 </head>
 <body>
     <div id="chat-container">
-        <div id="top-banner" class="top-banner hidden">
-            <div class="top-banner-content">
-                <span>新手指南：如何使用 Telegram 机器人与网页客服联动</span>
-                <a class="banner-link" href="guide.html" title="查看 Telegram 使用教程">立即查看</a>
-            </div>
-            <button id="banner-close" class="banner-close" aria-label="关闭">×</button>
-        </div>
-   
         <div class="app-body">
             <aside class="sidebar">
                 <div id="agent-selection">
                     <div class="sidebar-header">
-                        <h2>请选择客服</h2>
-                        <button id="refresh-agents" class="refresh-btn" title="刷新">刷新</button>
+                        <h2>选择客服</h2>
+                        <button id="refresh-agents" class="refresh-btn" title="刷新">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                            </svg>
+                        </button>
                     </div>
                     <div id="agent-grid" class="agent-grid">
                         <!-- agent cards injected here -->
@@ -29,17 +26,31 @@
                 </div>
             </aside>
             <main class="chat-pane">
+                <div id="welcome-screen">
+                    <div class="welcome-content">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-chat-left-dots" viewBox="0 0 16 16">
+                            <path d="M14 1a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4.414A2 2 0 0 0 3 11.586l-2 2V2a1 1 0 0 1 1-1h12zM2 0a2 2 0 0 0-2 2v12.793a.5.5 0 0 0 .854.353l2.853-2.853A1 1 0 0 1 4.414 12H14a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2H2z"/>
+                            <path d="M5 6a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm4 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0zm4 0a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/>
+                        </svg>
+                        <h3>你好！</h3>
+                        <p>请从左侧列表选择一位客服开始对话。</p>
+                    </div>
+                </div>
                 <div id="chat-window" class="hidden">
-                    <div id="chat-header" class="chat-header hidden">
+                    <div id="chat-header" class="chat-header">
+                        <button id="back-to-agents" class="back-btn" title="返回">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                                <path fill-rule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0z"/>
+                            </svg>
+                        </button>
                         <div class="agent-avatar" id="agent-avatar">K</div>
                         <div class="agent-title">
                             <div class="agent-name" id="agent-name">客服</div>
                             <div class="agent-status" id="agent-status" title="可用"></div>
                         </div>
                     </div>
-                    <div id="chat-info" class="hidden"></div>
                     <div id="messages"></div>
-                    <form id="form" class="hidden">
+                    <form id="form">
                         <input id="input" autocomplete="off" placeholder="输入消息..." />
                         <button>发送</button>
                     </form>

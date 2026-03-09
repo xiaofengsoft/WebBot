@@ -2,70 +2,57 @@ document.addEventListener('DOMContentLoaded', () => {
     const socket = io();
 
     // DOM Elements
-    const agentSelectionDiv = document.getElementById('agent-selection');
+    const sidebar = document.querySelector('.sidebar');
     const agentGrid = document.getElementById('agent-grid');
     const refreshBtn = document.getElementById('refresh-agents');
+    const welcomeScreen = document.getElementById('welcome-screen');
     const chatWindowDiv = document.getElementById('chat-window');
     const messagesDiv = document.getElementById('messages');
-    const chatInfoDiv = document.getElementById('chat-info');
-    const chatHeaderDiv = document.getElementById('chat-header');
     const backBtn = document.getElementById('back-to-agents');
     const agentNameEl = document.getElementById('agent-name');
     const agentAvatarEl = document.getElementById('agent-avatar');
-    // Top banner elements
-    const bannerEl = document.getElementById('top-banner');
-    const bannerCloseBtn = document.getElementById('banner-close');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
 
     let selectedAgentName = '';
     let selectedAgentId = null;
-    // messagesByAgent: { [agentId]: [ { sender, text, messageClass, ts } ] }
     let messagesByAgent = {};
-    let sessionId = null;
     let userId = null;
     let lastRenderedAgentId = null;
-    // Audio notification state
     let audioCtx = null;
-    let canPlaySound = true; // simple flag in case we later add a mute toggle
+    let canPlaySound = true;
 
-    // --- Event Listeners ---
-    // Initialize top banner visibility (always show on load)
-    (function initTopBanner() {
-        try {
-            if (bannerEl) bannerEl.classList.remove('hidden');
-            if (bannerCloseBtn) {
-                bannerCloseBtn.addEventListener('click', () => {
-                    if (bannerEl) bannerEl.classList.add('hidden');
-                });
-            }
-        } catch (e) {}
-    })();
+    const isMobile = () => window.innerWidth <= 768;
 
-    // Stable session id for this browser tab
-    function getOrCreateSessionId() {
-        try {
-            const existing = sessionStorage.getItem('session_id');
-            if (existing) return existing;
-        } catch (e) {}
-        const sid = 's_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-        try { sessionStorage.setItem('session_id', sid); } catch (e) {}
-        return sid;
+    // --- 视图管理 ---
+    function showChatView() {
+        if (isMobile()) {
+            sidebar.classList.add('hidden-mobile');
+        }
+        welcomeScreen.classList.add('hidden');
+        chatWindowDiv.classList.remove('hidden');
     }
 
-    function registerSession() {
-        sessionId = getOrCreateSessionId();
-        socket.emit('register_session', sessionId);
+    function showSelectionView() {
+        if (isMobile()) {
+            sidebar.classList.remove('hidden-mobile');
+            // 在移动端，返回时需要隐藏聊天窗口以显示客服列表
+            chatWindowDiv.classList.add('hidden');
+        } else {
+            // 在PC端，返回时显示欢迎页，隐藏聊天窗口
+            welcomeScreen.classList.remove('hidden');
+            chatWindowDiv.classList.add('hidden');
+        }
     }
 
+    // --- 事件监听 ---
     socket.on('connect', () => {
-        registerSession();
-        registerUser();
-        // Ask for latest agents on connect
+        userId = getOrCreateUserId();
+        socket.emit('register_user', userId);
         socket.emit('request_agents');
+        restoreSession(); // 在连接建立后恢复会话
     });
 
-    // Persistent user id for this browser (survives refresh and tabs)
     function getOrCreateUserId() {
         try {
             const existing = localStorage.getItem('user_id');
@@ -76,148 +63,101 @@ document.addEventListener('DOMContentLoaded', () => {
         return uid;
     }
 
-    function registerUser() {
-        userId = getOrCreateUserId();
-        socket.emit('register_user', userId);
-    }
-
-    // Ensure userId is available before attempting restore
-    userId = getOrCreateUserId();
-
-    // Enforce initial state: show selection, hide chat header/info and input form
-    agentSelectionDiv.classList.remove('hidden');
-    chatWindowDiv.classList.add('hidden');
-    if (chatHeaderDiv) chatHeaderDiv.classList.add('hidden');
-    if (chatInfoDiv) chatInfoDiv.classList.add('hidden');
-    if (form) form.classList.add('hidden');
-
-    // Update agent list from server (render as cards)
     socket.on('update_agents', (agents) => {
         renderAgentCards(agents);
-        // If we restored a selection, ensure we re-select on the server
+        // 如果有已选客服，高亮显示
         if (selectedAgentId) {
-            socket.emit('select_agent', selectedAgentId);
+            const selectedCard = document.querySelector(`.agent-card[data-id="${selectedAgentId}"]`);
+            if (selectedCard) selectedCard.classList.add('selected');
         }
     });
 
-    // Manual refresh
     if (refreshBtn) {
-        refreshBtn.addEventListener('click', () => {
-            socket.emit('request_agents');
-        });
+        refreshBtn.addEventListener('click', () => socket.emit('request_agents'));
     }
-
-    // Periodic refresh (keep list fresh)
     setInterval(() => {
-        socket.emit('request_agents');
+        if (socket.connected) {
+            socket.emit('request_agents');
+        }
     }, 15000);
 
-    // Handle agent selection confirmation
     socket.on('agent_selected', (agentName) => {
         selectedAgentName = agentName;
-        chatWindowDiv.classList.remove('hidden');
-        chatInfoDiv.textContent = `正在与 ${selectedAgentName} 客服聊天`;
-        if (chatHeaderDiv) chatHeaderDiv.classList.remove('hidden');
-        if (chatInfoDiv) chatInfoDiv.classList.remove('hidden');
-        // update chat header
+        showChatView();
         agentNameEl.textContent = selectedAgentName;
         const initial = (selectedAgentName || '?').trim().charAt(0).toUpperCase();
         agentAvatarEl.textContent = initial || 'K';
-        if (form) form.classList.remove('hidden');
         saveSession();
-        // Render messages for this agent (guard against duplicate rendering)
         if (selectedAgentId && lastRenderedAgentId !== selectedAgentId) {
             renderMessagesForSelectedAgent();
         }
-        // Highlight selected in sidebar if cards already rendered
-        if (selectedAgentId) {
-            const card = document.querySelector(`.agent-card[data-id="${selectedAgentId}"]`);
-            if (card) {
-                document.querySelectorAll('.agent-card.selected').forEach(el => el.classList.remove('selected'));
-                card.classList.add('selected');
-            }
+        const card = document.querySelector(`.agent-card[data-id="${selectedAgentId}"]`);
+        if (card) {
+            document.querySelectorAll('.agent-card.selected').forEach(el => el.classList.remove('selected'));
+            card.classList.add('selected');
         }
     });
 
-    // Back to agent selection
     if (backBtn) {
         backBtn.addEventListener('click', () => {
-            chatWindowDiv.classList.add('hidden');
-            agentSelectionDiv.classList.remove('hidden');
-            messagesDiv.innerHTML = '';
-            chatInfoDiv.textContent = '';
-            selectedAgentName = '';
-            if (form) form.classList.add('hidden');
+            showSelectionView();
         });
     }
 
-    // Handle form submission to send a message
     form.addEventListener('submit', (e) => {
         e.preventDefault();
         if (!selectedAgentName) {
-            alert('请先选择客服');
+            console.error('请先选择客服');
             return;
         }
         if (input.value) {
-            const message = input.value;
-            socket.emit('web_message', { message });
-            appendMessage('我', message, 'user-message', { ts: Date.now(), persist: true });
-            input.value = '';
+            const message = input.value.trim();
+            if (message) {
+                socket.emit('web_message', { message });
+                appendMessage('我', message, 'user-message', { ts: Date.now(), persist: true });
+                input.value = '';
+            }
         }
     });
 
-    // Display incoming messages from an agent
     socket.on('agent_message', (data) => {
-        // Normalize to string to avoid number/string mismatch
         const aid = (data && data.agentId != null) ? String(data.agentId) : selectedAgentId;
         appendMessage(data.agentName, data.message, 'agent-message', { ts: data.ts, persist: true, agentId: aid });
-        // If the message is for the currently selected agent, it will appear immediately via appendMessage
         playNotify();
     });
 
-    // Display error messages
     socket.on('error_message', (message) => {
-        alert(message);
+        console.error(message);
     });
 
-    // --- Helper Functions ---
+    // --- 辅助函数 ---
     function playNotify() {
-        if (!canPlaySound) return;
+        if (!canPlaySound || document.hidden) return;
         try {
             if (!audioCtx) {
                 const AC = window.AudioContext || window.webkitAudioContext;
-                if (!AC) return; // unsupported
+                if (!AC) return;
                 audioCtx = new AC();
             }
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume().catch(() => {});
-            }
-            const now = audioCtx.currentTime;
+            if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
             const o = audioCtx.createOscillator();
             const g = audioCtx.createGain();
             o.type = 'sine';
-            o.frequency.setValueAtTime(880, now); // A5
-            g.gain.setValueAtTime(0.0001, now);
-            g.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
-            g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+            o.frequency.setValueAtTime(880, audioCtx.currentTime);
+            g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+            g.gain.exponentialRampToValueAtTime(0.1, audioCtx.currentTime + 0.02);
+            g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.2);
             o.connect(g);
             g.connect(audioCtx.destination);
-            o.start(now);
-            o.stop(now + 0.2);
-        } catch (e) {
-            // ignore audio errors
-        }
+            o.start(audioCtx.currentTime);
+            o.stop(audioCtx.currentTime + 0.2);
+        } catch (e) {}
     }
 
     function renderAgentCards(agents) {
         agentGrid.innerHTML = '';
         if (!agents || agents.length === 0) {
-            const empty = document.createElement('div');
-            empty.textContent = '暂无客服在线，请稍后重试';
-            empty.style.color = '#6b7280';
-            empty.style.fontSize = '14px';
-            empty.style.textAlign = 'center';
-            agentGrid.appendChild(empty);
+            agentGrid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 20px;">暂无客服在线</div>';
             return;
         }
         agents.forEach(agent => {
@@ -225,41 +165,28 @@ document.addEventListener('DOMContentLoaded', () => {
             card.className = 'agent-card';
             card.setAttribute('data-id', agent.id);
 
-            const nameEl = document.createElement('div');
-            nameEl.className = 'agent-name';
-            nameEl.textContent = agent.name;
-
-            const metaEl = document.createElement('div');
-            metaEl.className = 'agent-meta';
-            metaEl.textContent = '点击开始聊天';
-
-            card.appendChild(nameEl);
-            card.appendChild(metaEl);
+            const initial = (agent.name || '?').trim().charAt(0).toUpperCase();
+            card.innerHTML = `
+                <div class="agent-badge">${initial}</div>
+                <div class="agent-info">
+                    <div class="agent-name">${agent.name}</div>
+                    <div class="agent-sub">在线客服</div>
+                </div>
+            `;
 
             card.addEventListener('click', () => {
-                // visual selection
                 document.querySelectorAll('.agent-card.selected').forEach(el => el.classList.remove('selected'));
                 card.classList.add('selected');
                 selectedAgentId = card.getAttribute('data-id');
                 selectedAgentName = agent.name;
                 saveSession();
                 socket.emit('select_agent', selectedAgentId);
-                // Immediately show this agent's history without waiting for echo
-                // Also unhide the chat UI immediately for better UX
-                chatWindowDiv.classList.remove('hidden');
-                if (chatHeaderDiv) chatHeaderDiv.classList.remove('hidden');
-                if (chatInfoDiv) chatInfoDiv.classList.remove('hidden');
-                if (form) form.classList.remove('hidden');
-                chatInfoDiv.textContent = `正在与 ${selectedAgentName} 客服聊天`;
-                agentNameEl.textContent = selectedAgentName || '客服';
-                const initial = (selectedAgentName || '?').trim().charAt(0).toUpperCase();
-                agentAvatarEl.textContent = initial || 'K';
+                // 点击后立即切换视图并渲染消息
+                showChatView();
                 renderMessagesForSelectedAgent();
             });
-
             agentGrid.appendChild(card);
         });
-        // Re-highlight previously selected agent after render
         if (selectedAgentId) {
             const selectedCard = document.querySelector(`.agent-card[data-id="${selectedAgentId}"]`);
             if (selectedCard) selectedCard.classList.add('selected');
@@ -268,120 +195,91 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function formatTime(ts) {
         try {
-            const d = new Date(typeof ts === 'number' ? ts : Date.now());
+            const d = new Date(ts);
             const pad = (n) => (n < 10 ? '0' + n : '' + n);
-            const y = d.getFullYear();
-            const m = pad(d.getMonth() + 1);
-            const dd = pad(d.getDate());
-            const hh = pad(d.getHours());
-            const mm = pad(d.getMinutes());
-            return `${y}-${m}-${dd} ${hh}:${mm}`;
-        } catch (e) {
-            return '';
-        }
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        } catch (e) { return ''; }
     }
 
     function appendMessage(sender, text, messageClass, opts = { persist: true, ts: null, agentId: null }) {
-        const messageElement = document.createElement('div');
-        messageElement.classList.add('message', messageClass);
-
-        const senderElement = document.createElement('div');
-        senderElement.classList.add('sender');
-        senderElement.textContent = sender;
-
-        const textElement = document.createElement('div');
-        textElement.classList.add('text');
-        textElement.textContent = text;
-
-        const ts = opts && typeof opts.ts === 'number' ? opts.ts : Date.now();
-        const timeElement = document.createElement('div');
-        timeElement.classList.add('meta');
-        timeElement.textContent = formatTime(ts);
-
-        messageElement.appendChild(senderElement);
-        messageElement.appendChild(textElement);
-        messageElement.appendChild(timeElement);
-        // Only render to DOM if this message belongs to the currently selected agent
-        // For user-sent messages, they always belong to selectedAgentId
         const belongAgentId = (opts && opts.agentId != null) ? String(opts.agentId) : selectedAgentId;
-        if (String(belongAgentId) === String(selectedAgentId)) {
-            messagesDiv.appendChild(messageElement);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        
+        if (opts && opts.persist) {
+            const aid = belongAgentId;
+            if (!aid) return;
+            if (!messagesByAgent[aid]) messagesByAgent[aid] = [];
+            messagesByAgent[aid].push({ sender, text, messageClass, ts: opts.ts || Date.now() });
+            saveSession();
         }
 
-        // persist only when requested (default true)
-        if (opts && opts.persist) {
-            const aid = (belongAgentId != null ? String(belongAgentId) : selectedAgentId);
-            if (!aid) return; // nothing to persist without agent context
-            if (!messagesByAgent[aid]) messagesByAgent[aid] = [];
-            messagesByAgent[aid].push({ sender, text, messageClass, ts });
-            saveSession();
+        if (String(belongAgentId) === String(selectedAgentId)) {
+            const messageElement = document.createElement('div');
+            messageElement.className = `message ${messageClass}`;
+            const time = formatTime(opts.ts || Date.now());
+            // Sanitize text before inserting into innerHTML to prevent XSS
+            const sanitizedText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            messageElement.innerHTML = `
+                <div class="sender">${sender}</div>
+                <div class="text">${sanitizedText}</div>
+                <div class="meta">${time}</div>
+            `;
+            messagesDiv.appendChild(messageElement);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
     }
 
     function renderMessagesForSelectedAgent() {
         messagesDiv.innerHTML = '';
-        const list = (selectedAgentId && messagesByAgent[String(selectedAgentId)]) ? messagesByAgent[String(selectedAgentId)] : [];
+        const list = (selectedAgentId && messagesByAgent[String(selectedAgentId)]) || [];
         list.forEach(m => appendMessage(m.sender, m.text, m.messageClass, { persist: false, ts: m.ts, agentId: selectedAgentId }));
         lastRenderedAgentId = selectedAgentId;
     }
 
-    // --- Session Persistence ---
+    // --- 会话持久化 ---
     function getStateKey() {
-        const uid = userId || getOrCreateUserId();
-        return `chat_state_${uid}`;
+        return `chat_state_${userId || getOrCreateUserId()}`;
     }
 
     function saveSession() {
-        const state = {
-            selectedAgentId,
-            selectedAgentName,
-            messagesByAgent,
-        };
         try {
+            const state = { selectedAgentId, selectedAgentName, messagesByAgent };
             localStorage.setItem(getStateKey(), JSON.stringify(state));
-        } catch (e) { /* ignore quota errors */ }
+        } catch (e) {}
     }
 
     function restoreSession() {
         try {
             const raw = localStorage.getItem(getStateKey());
-            if (!raw) return;
+            if (!raw) {
+                showSelectionView(); // 没有会话，显示选择页
+                return;
+            }
             const state = JSON.parse(raw);
-            if (!state) return;
+            if (!state) {
+                showSelectionView();
+                return;
+            }
             selectedAgentId = state.selectedAgentId || null;
             selectedAgentName = state.selectedAgentName || '';
-            // Migration: if legacy flat messages exist, fold them under selectedAgentId
-            if (Array.isArray(state.messages)) {
-                messagesByAgent = {};
-                if (state.selectedAgentId) {
-                    messagesByAgent[state.selectedAgentId] = state.messages;
-                }
-            } else {
-                messagesByAgent = state.messagesByAgent && typeof state.messagesByAgent === 'object' ? state.messagesByAgent : {};
-            }
+            messagesByAgent = state.messagesByAgent && typeof state.messagesByAgent === 'object' ? state.messagesByAgent : {};
 
-            if (selectedAgentId) {
-                // Restore UI immediately (keep sidebar visible)
-                chatWindowDiv.classList.remove('hidden');
-                if (chatHeaderDiv) chatHeaderDiv.classList.remove('hidden');
-                if (chatInfoDiv) chatInfoDiv.classList.remove('hidden');
-                if (form) form.classList.remove('hidden');
-
+            if (selectedAgentId && socket.connected) {
+                showChatView();
                 agentNameEl.textContent = selectedAgentName || '客服';
                 const initial = (selectedAgentName || '?').trim().charAt(0).toUpperCase();
                 agentAvatarEl.textContent = initial || 'K';
-                chatInfoDiv.textContent = selectedAgentName ? `正在与 ${selectedAgentName} 客服聊天` : '';
-
-                // Re-render messages for selected agent
                 renderMessagesForSelectedAgent();
-
-                // Re-select on server so routing works for the new socket
                 socket.emit('select_agent', selectedAgentId);
+            } else {
+                showSelectionView();
             }
-        } catch (e) { /* ignore parse errors */ }
+        } catch (e) {
+            console.error("Failed to restore session:", e);
+            showSelectionView();
+        }
     }
 
-    // Run restore on load
-    restoreSession();
+    // --- 初始化 ---
+    // 初始视图由 restoreSession 控制
+    userId = getOrCreateUserId(); // 确保 userId 在连接前已存在
 });

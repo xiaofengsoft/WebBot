@@ -12,12 +12,19 @@ if (!token) {
     console.error('Please set TELEGRAM_BOT_TOKEN before starting the server.');
     process.exit(1);
 }
+// 保持 ADMIN_ID 为字符串类型，以避免大数字精度问题
+const ADMIN_ID = process.env.ADMIN_ID;
+const DEBUG = process.env.DEBUG == 'true';
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
-const bot = new TelegramBot(token, { polling: true });
-const ADMIN_ID = 5294431884; // Telegram user ID of the admin
+const bot = new TelegramBot(token, {
+    polling: true,
+    request: DEBUG ? undefined : {
+        proxy: 'http://127.0.0.1:7890'
+    }
+});
 
 // In-memory storage for customer service agents and chats
 let supportAgents = {}; // Stores { agentId: { name, chatId } }
@@ -204,7 +211,8 @@ io.on('connection', (socket) => {
 // 2) Register another user: /addsupport <Name> <tg_id|@username>
 //    If @username is used, that user must have sent a message to this bot at least once.
 bot.onText(/\/addsupport\s+(\S+)(?:\s+(\S+))?/, (msg, match) => {
-    if (!msg.from || msg.from.id !== ADMIN_ID) {
+    // 使用字符串比较
+    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
         return;
     }
@@ -251,7 +259,8 @@ bot.onText(/\/addsupport\s+(\S+)(?:\s+(\S+))?/, (msg, match) => {
 
 // List all registered support agents
 bot.onText(/\/listsupport$/, (msg) => {
-    if (!msg.from || msg.from.id !== ADMIN_ID) {
+    // 使用字符串比较
+    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
         return;
     }
@@ -267,7 +276,8 @@ bot.onText(/\/listsupport$/, (msg) => {
 
 // Remove support agent: /removesupport <tg_id|@username|me>
 bot.onText(/\/removesupport(?:\s+(\S+))?$/, (msg, match) => {
-    if (!msg.from || msg.from.id !== ADMIN_ID) {
+    // 使用字符串比较
+    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
         return;
     }
