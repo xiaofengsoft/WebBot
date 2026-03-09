@@ -21,9 +21,9 @@ const server = http.createServer(app);
 const io = socketIo(server);
 const bot = new TelegramBot(token, {
     polling: true,
-    request: DEBUG ? undefined : {
+    request: DEBUG ?  {
         proxy: 'http://127.0.0.1:7890'
-    }
+    } : undefined
 });
 
 // In-memory storage for customer service agents and chats
