@@ -21,8 +21,25 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastRenderedAgentId = null;
     let audioCtx = null;
     let canPlaySound = true;
+    let externalContext = { createIp: '', vName: '', memberId: '' };
 
     const isMobile = () => window.innerWidth <= 768;
+
+    function getExternalContextFromUrl() {
+        try {
+            const params = new URLSearchParams(window.location.search || '');
+            return {
+                // 兼容示例中的 LzUrl
+                createIp: (params.get('CreateIp') || params.get('LzUrl') || '').trim(),
+                vName: (params.get('VName') || '').trim(),
+                memberId: (params.get('Id') || '').trim()
+            };
+        } catch (e) {
+            return { createIp: '', vName: '', memberId: '' };
+        }
+    }
+
+    externalContext = getExternalContextFromUrl();
 
     // --- 视图管理 ---
     function showChatView() {
@@ -113,7 +130,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (input.value) {
             const message = input.value.trim();
             if (message) {
-                socket.emit('web_message', { message });
+                socket.emit('web_message', {
+                    message,
+                    createIp: externalContext.createIp,
+                    vName: externalContext.vName,
+                    id: externalContext.memberId
+                });
                 appendMessage('我', message, 'user-message', { ts: Date.now(), persist: true });
                 input.value = '';
             }

@@ -170,19 +170,30 @@ io.on('connection', (socket) => {
         const agentId = userId ? userChatsByUser[userId] : userChatsBySession[sessionId];
         const agent = supportAgents[agentId];
         if (agent) {
-            // Prefer user marker for stability across reconnects
-            const marker = userId ? `user:${userId}` : `session_${sessionId}`;
             const ts = Date.now();
+            const createIp = String((data && (data.createIp || data.CreateIp || data.LzUrl || data.lzUrl)) || '').trim();
+            const vName = String((data && (data.vName || data.VName)) || '').trim();
+            const memberId = String((data && (data.id || data.Id)) || '').trim();
+
+            // marker 改为会员ID优先
+            const marker = memberId || (userId ? `user:${userId}` : `session_${sessionId}`);
+
             if (userId && agentId) {
                 pushHistory(userId, agentId, { from: 'user', name: '用户', text: data.message, ts });
             }
+
             const historyBlock = (userId && agentId) ? buildHistorySnippet(userId, agentId, 5, 200) : '';
+            const paramBlock = [
+                `${createIp || '未提供'}`,
+                `${vName || '未提供'}`
+            ].join('——');
+
             let message = historyBlock
-                ? `来自网页用户（${marker}）\n—— 最近会话（最多 5 条） ——\n${historyBlock}\n—— 回复本消息可直接发送给该用户 ——`
-                : `来自网页用户（${marker}）\n—— 最近会话（最多 5 条） ——\n【${formatTs(ts)}】用户：${data.message}\n—— 回复本消息可直接发送给该用户 ——`;
+                ? `来自网页用户（ID:${marker}）——${paramBlock}\n—— 最近会话（最多 5 条） ——\n${historyBlock}\n—— 回复本消息可直接发送给该用户 ——`
+                : `来自网页用户（ID:${marker}）——${paramBlock}\n—— 最近会话（最多 5 条） ——\n【${formatTs(ts)}】用户：${data.message}\n—— 回复本消息可直接发送给该用户 ——`;
             // IMPORTANT: Append ASCII marker for reply routing compatibility
-            if (userId) {
-                message += `\n(${`user:${userId}`})`;
+            if (marker) {
+                message += `\n(${`user:${marker}`})`;
             } else if (sessionId) {
                 message += `\n(${`session_${sessionId}`})`;
             }
