@@ -45,6 +45,26 @@ let offlineQueuesByUser = {};
 // In-memory chat history per user-agent pair: `${userId}::${agentId}` -> [ { from: 'user'|'agent', name, text, ts } ]
 let historiesByUA = {};
 
+function initSupportAgents() {
+    const config = process.env.SUPPORT_TG_ID || '';
+    const entries = config.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    entries.forEach(entry => {
+        const parts = entry.split('|').map(s => s.trim());
+        if (parts.length === 2) {
+            const tgId = parts[0];
+            const name = parts[1];
+            if (/^\d+$/.test(tgId)) {
+                supportAgents[tgId] = { name, chatId: Number(tgId) };
+                console.log(`Initialized support agent from config: ${name} (chatId: ${tgId})`);
+            } else {
+                console.warn(`Invalid tgId in SUPPORT_TG_ID entry: ${entry}`);
+            }
+        } else {
+            console.warn(`Invalid SUPPORT_TG_ID entry (expected format tgId|Name): ${entry}`);
+        }
+    });
+}
+
 function getHistoryKey(userId, agentId) {
     if (!userId || !agentId) return null;
     return `${userId}::${agentId}`;
@@ -224,110 +244,110 @@ io.on('connection', (socket) => {
 // 1) Self-register: /addsupport <Name>
 // 2) Register another user: /addsupport <Name> <tg_id|@username>
 //    If @username is used, that user must have sent a message to this bot at least once.
-bot.onText(/\/addsupport\s+(\S+)(?:\s+(\S+))?/, (msg, match) => {
-    // 使用字符串比较
-    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
-        bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
-        return;
-    }
-    const requesterChatId = msg.chat.id;
-    const name = match[1];
-    const target = match[2];
+// bot.onText(/\/addsupport\s+(\S+)(?:\s+(\S+))?/, (msg, match) => {
+//     // 使用字符串比较
+//     if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
+//         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
+//         return;
+//     }
+//     const requesterChatId = msg.chat.id;
+//     const name = match[1];
+//     const target = match[2];
 
-    let targetChatId = requesterChatId; // default self-register
-    let username = undefined;
+//     let targetChatId = requesterChatId; // default self-register
+//     let username = undefined;
 
-    if (target) {
-        if (target.startsWith('@')) {
-            username = target.slice(1).toLowerCase();
-            const resolved = knownUsersByUsername[username];
-            if (!resolved) {
-                bot.sendMessage(requesterChatId, `无法解析 @${username}。请对方先与机器人开始对话后再尝试。`);
-                return;
-            }
-            targetChatId = resolved;
-        } else if (/^\d+$/.test(target)) {
-            targetChatId = Number(target);
-        } else {
-            bot.sendMessage(requesterChatId, '无效的目标。请使用数字 Telegram ID 或 @用户名。');
-            return;
-        }
-    }
+//     if (target) {
+//         if (target.startsWith('@')) {
+//             username = target.slice(1).toLowerCase();
+//             const resolved = knownUsersByUsername[username];
+//             if (!resolved) {
+//                 bot.sendMessage(requesterChatId, `无法解析 @${username}。请对方先与机器人开始对话后再尝试。`);
+//                 return;
+//             }
+//             targetChatId = resolved;
+//         } else if (/^\d+$/.test(target)) {
+//             targetChatId = Number(target);
+//         } else {
+//             bot.sendMessage(requesterChatId, '无效的目标。请使用数字 Telegram ID 或 @用户名。');
+//             return;
+//         }
+//     }
 
-    const existed = Boolean(supportAgents[targetChatId]);
-    supportAgents[targetChatId] = { name, chatId: targetChatId, username };
-    if (existed) {
-        console.log(`Updated support agent: ${name} with Chat ID: ${targetChatId}`);
-        bot.sendMessage(requesterChatId, `已更新客服：${name}（chatId: ${targetChatId}）。`);
-    } else {
-        console.log(`Added new support agent: ${name} with Chat ID: ${targetChatId}`);
-        bot.sendMessage(requesterChatId, `已添加客服：${name}（chatId: ${targetChatId}）。`);
-    }
+//     const existed = Boolean(supportAgents[targetChatId]);
+//     supportAgents[targetChatId] = { name, chatId: targetChatId, username };
+//     if (existed) {
+//         console.log(`Updated support agent: ${name} with Chat ID: ${targetChatId}`);
+//         bot.sendMessage(requesterChatId, `已更新客服：${name}（chatId: ${targetChatId}）。`);
+//     } else {
+//         console.log(`Added new support agent: ${name} with Chat ID: ${targetChatId}`);
+//         bot.sendMessage(requesterChatId, `已添加客服：${name}（chatId: ${targetChatId}）。`);
+//     }
 
-    // Broadcast only agents with resolved chatId to web clients
-    io.emit('update_agents', Object.values(supportAgents)
-        .filter(agent => !!agent.chatId)
-        .map(agent => ({ id: agent.chatId, name: agent.name }))
-    );
-});
+//     // Broadcast only agents with resolved chatId to web clients
+//     io.emit('update_agents', Object.values(supportAgents)
+//         .filter(agent => !!agent.chatId)
+//         .map(agent => ({ id: agent.chatId, name: agent.name }))
+//     );
+// });
 
 // List all registered support agents
-bot.onText(/\/listsupport$/, (msg) => {
-    // 使用字符串比较
-    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
-        bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
-        return;
-    }
-    const chatId = msg.chat.id;
-    const agents = Object.values(supportAgents);
-    if (agents.length === 0) {
-        bot.sendMessage(chatId, '尚未注册任何客服。使用 /addsupport <名称> 进行注册。');
-        return;
-    }
-    const lines = agents.map(a => `• ${a.name}（chatId: ${a.chatId}${a.username ? `, @${a.username}` : ''}）`).join('\n');
-    bot.sendMessage(chatId, `当前客服列表：\n${lines}`);
-});
+// bot.onText(/\/listsupport$/, (msg) => {
+//     // 使用字符串比较
+//     if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
+//         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
+//         return;
+//     }
+//     const chatId = msg.chat.id;
+//     const agents = Object.values(supportAgents);
+//     if (agents.length === 0) {
+//         bot.sendMessage(chatId, '尚未注册任何客服。使用 /addsupport <名称> 进行注册。');
+//         return;
+//     }
+//     const lines = agents.map(a => `• ${a.name}（chatId: ${a.chatId}${a.username ? `, @${a.username}` : ''}）`).join('\n');
+//     bot.sendMessage(chatId, `当前客服列表：\n${lines}`);
+// });
 
 // Remove support agent: /removesupport <tg_id|@username|me>
-bot.onText(/\/removesupport(?:\s+(\S+))?$/, (msg, match) => {
-    // 使用字符串比较
-    if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
-        bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
-        return;
-    }
-    const chatId = msg.chat.id;
-    const arg = match[1];
-    let targetChatId;
+// bot.onText(/\/removesupport(?:\s+(\S+))?$/, (msg, match) => {
+//     // 使用字符串比较
+//     if (!msg.from || String(msg.from.id) !== ADMIN_ID) {
+//         bot.sendMessage(msg.chat.id, '仅管理员可以执行此命令。');
+//         return;
+//     }
+//     const chatId = msg.chat.id;
+//     const arg = match[1];
+//     let targetChatId;
 
-    if (!arg || arg.toLowerCase() === 'me') {
-        targetChatId = chatId;
-    } else if (arg.startsWith('@')) {
-        const uname = arg.slice(1).toLowerCase();
-        targetChatId = knownUsersByUsername[uname];
-    } else if (/^\d+$/.test(arg)) {
-        targetChatId = Number(arg);
-    }
+//     if (!arg || arg.toLowerCase() === 'me') {
+//         targetChatId = chatId;
+//     } else if (arg.startsWith('@')) {
+//         const uname = arg.slice(1).toLowerCase();
+//         targetChatId = knownUsersByUsername[uname];
+//     } else if (/^\d+$/.test(arg)) {
+//         targetChatId = Number(arg);
+//     }
 
-    if (!targetChatId || !supportAgents[targetChatId]) {
-        bot.sendMessage(chatId, '未在客服列表中找到目标。');
-        return;
-    }
+//     if (!targetChatId || !supportAgents[targetChatId]) {
+//         bot.sendMessage(chatId, '未在客服列表中找到目标。');
+//         return;
+//     }
 
-    const removed = supportAgents[targetChatId];
-    delete supportAgents[targetChatId];
-    bot.sendMessage(chatId, `已移除客服：${removed.name}（chatId: ${targetChatId}）。`);
-    io.emit('update_agents', Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name })));
-});
+//     const removed = supportAgents[targetChatId];
+//     delete supportAgents[targetChatId];
+//     bot.sendMessage(chatId, `已移除客服：${removed.name}（chatId: ${targetChatId}）。`);
+//     io.emit('update_agents', Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name })));
+// });
 
 // Help command
 bot.onText(/\/help$/, (msg) => {
     const chatId = msg.chat.id;
     const helpText = [
         '命令列表：',
-        '/addsupport <名称> — 将自己注册为客服，显示名称为 <名称>。',
-        '/addsupport <名称> <tg_id|@用户名> — 将他人注册为客服（对方需先与机器人对话）。',
-        '/listsupport — 查看所有客服。',
-        '/removesupport <tg_id|@用户名|me> — 移除客服。',
+        // '/addsupport <名称> — 将自己注册为客服，显示名称为 <名称>。',
+        // '/addsupport <名称> <tg_id|@用户名> — 将他人注册为客服（对方需先与机器人对话）。',
+        // '/listsupport — 查看所有客服。',
+        // '/removesupport <tg_id|@用户名|me> — 移除客服。',
         '/whoami — 查看你的 chatId、用户名和姓名（并缓存你的用户名）。'
     ].join('\n');
     bot.sendMessage(chatId, helpText);
@@ -507,6 +527,7 @@ bot.on('message', (msg) => {
     }
 });
 
+initSupportAgents();
 
 server.listen(3000, () => {
     console.log('Server is running on http://localhost:3000');
