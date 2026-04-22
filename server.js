@@ -4,6 +4,8 @@ const https = require('https');
 const socketIo = require('socket.io');
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 // --- Configuration ---
 // Read Telegram Bot Token from environment variable
@@ -50,6 +52,55 @@ let historiesByUA = {};
 let routeByReplyMessage = {}; // { `${chatId}:${messageId}`: { userId, sessionId, agentId, memberId, createIp, vName, displayId, ts } }
 let routeReplyKeyOrder = [];
 const ROUTE_CACHE_LIMIT = Number(process.env.ROUTE_CACHE_LIMIT || 5000);
+
+// 公告/通知客服配置
+const NOTICE_CHAT_ID = process.env.NOTICE_CHAT_ID ? String(process.env.NOTICE_CHAT_ID) : '';
+const NOTICE_AGENT_ID = '__notice__';
+const NOTICE_AGENT_NAME = '通知信息';
+const NOTICE_HISTORY_LIMIT = Number(process.env.NOTICE_HISTORY_LIMIT || 200);
+const NOTICE_TMP_FILE = path.join(__dirname, 'tmp.json');
+let noticeMessages = []; // [{ text, ts }]
+
+function buildAgentList() {
+    const normalAgents = Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name }));
+    return [{ id: NOTICE_AGENT_ID, name: NOTICE_AGENT_NAME }, ...normalAgents];
+}
+
+function extractNoticeText(msg) {
+    return String((msg && (msg.text || msg.caption)) || '').trim();
+}
+
+function isNoticeChatMessage(msg) {
+    if (!NOTICE_CHAT_ID || !msg || !msg.chat) return false;
+    const chatId = String(msg.chat.id).trim();
+    const expected = NOTICE_CHAT_ID.split(',').map(s => s.trim()).filter(Boolean);
+    const matched = expected.includes(chatId);
+    if (DEBUG) {
+        console.log(`[NOTICE] incoming chatId=${chatId}, expected=${expected.join('|')}, matched=${matched}`);
+    }
+    return matched;
+}
+
+function pushNoticeMessage(text, ts) {
+    if (!text) return;
+    noticeMessages.push({ text, ts: ts || Date.now() });
+    if (noticeMessages.length > NOTICE_HISTORY_LIMIT) {
+        noticeMessages = noticeMessages.slice(-NOTICE_HISTORY_LIMIT);
+    }
+    saveNoticeMessagesToFile();
+}
+
+function handleNoticeIncoming(msg) {
+    if (!isNoticeChatMessage(msg)) return;
+    const text = extractNoticeText(msg);
+    if (!text) return;
+    const ts = msg && msg.date ? msg.date * 1000 : Date.now();
+    pushNoticeMessage(text, ts);
+    if (DEBUG) {
+        console.log(`[NOTICE] captured text: ${text.slice(0, 80)}`);
+    }
+    io.emit('notice_message', { text, ts, agentId: NOTICE_AGENT_ID, agentName: NOTICE_AGENT_NAME });
+}
 
 function rememberReplyRoute(chatId, messageId, routeInfo) {
     if (!chatId || !messageId) return;
@@ -260,11 +311,11 @@ io.on('connection', (socket) => {
     socket.emit('config', { defaultMessage: process.env.DEFAULT_MESSAGE || '' });
 
     // Send the list of available agents to the new client
-    socket.emit('update_agents', Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name })));
+    socket.emit('update_agents', buildAgentList());
 
     // Allow client to request the latest agent list on demand
     socket.on('request_agents', () => {
-        socket.emit('update_agents', Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name })));
+        socket.emit('update_agents', buildAgentList());
     });
 
     // Web client registers a persistent userId (UUID/phone/email/dbid)
@@ -273,7 +324,15 @@ io.on('connection', (socket) => {
         socketToUser[socket.id] = userId;
         userToSocket[userId] = socket.id;
         const agentId = userChatsByUser[userId];
-        if (agentId && supportAgents[agentId]) {
+        if (String(agentId) === NOTICE_AGENT_ID) {
+            socket.emit('agent_selected', NOTICE_AGENT_NAME);
+            socket.emit('notice_messages', noticeMessages.map(n => ({
+                text: n.text,
+                ts: n.ts,
+                agentId: NOTICE_AGENT_ID,
+                agentName: NOTICE_AGENT_NAME
+            })));
+        } else if (agentId && supportAgents[agentId]) {
             socket.emit('agent_selected', supportAgents[agentId].name);
         }
         console.log(`User registered: user:${userId} -> socket ${socket.id}`);
@@ -288,7 +347,15 @@ io.on('connection', (socket) => {
         sessionToSocket[sessionId] = socket.id;
         // If this session had an agent selected previously, restore client state
         const agentId = userChatsBySession[sessionId];
-        if (agentId && supportAgents[agentId]) {
+        if (String(agentId) === NOTICE_AGENT_ID) {
+            socket.emit('agent_selected', NOTICE_AGENT_NAME);
+            socket.emit('notice_messages', noticeMessages.map(n => ({
+                text: n.text,
+                ts: n.ts,
+                agentId: NOTICE_AGENT_ID,
+                agentName: NOTICE_AGENT_NAME
+            })));
+        } else if (agentId && supportAgents[agentId]) {
             socket.emit('agent_selected', supportAgents[agentId].name);
         }
         console.log(`Session registered: session_${sessionId} -> socket ${socket.id}`);
@@ -297,6 +364,20 @@ io.on('connection', (socket) => {
     socket.on('select_agent', (agentId) => {
         const sessionId = socketToSession[socket.id];
         const userId = socketToUser[socket.id];
+
+        if (String(agentId) === NOTICE_AGENT_ID) {
+            if (sessionId) userChatsBySession[sessionId] = NOTICE_AGENT_ID;
+            if (userId) userChatsByUser[userId] = NOTICE_AGENT_ID;
+            socket.emit('agent_selected', NOTICE_AGENT_NAME);
+            socket.emit('notice_messages', noticeMessages.map(n => ({
+                text: n.text,
+                ts: n.ts,
+                agentId: NOTICE_AGENT_ID,
+                agentName: NOTICE_AGENT_NAME
+            })));
+            return;
+        }
+
         if (supportAgents[agentId]) {
             if (sessionId) userChatsBySession[sessionId] = agentId;
             if (userId) userChatsByUser[userId] = agentId;
@@ -311,6 +392,12 @@ io.on('connection', (socket) => {
         const sessionId = socketToSession[socket.id];
         const userId = socketToUser[socket.id];
         const agentId = userId ? userChatsByUser[userId] : userChatsBySession[sessionId];
+
+        if (String(agentId) === NOTICE_AGENT_ID) {
+            socket.emit('error_message', '通知信息为只读公告，无法发送消息。');
+            return;
+        }
+
         const agent = supportAgents[agentId];
         if (agent) {
             const ts = Date.now();
@@ -370,6 +457,12 @@ io.on('connection', (socket) => {
         const sessionId = socketToSession[socket.id];
         const userId = socketToUser[socket.id];
         const agentId = userId ? userChatsByUser[userId] : userChatsBySession[sessionId];
+
+        if (String(agentId) === NOTICE_AGENT_ID) {
+            socket.emit('error_message', '通知信息为只读公告，无法发送图片。');
+            return;
+        }
+
         const agent = supportAgents[agentId];
         if (!agent) {
             socket.emit('error_message', '请先选择客服。');
@@ -576,8 +669,16 @@ bot.onText(/\/whoami$/, (msg) => {
     bot.sendMessage(chatId, text);
 });
 
+// 监听频道消息（channel post）
+bot.on('channel_post', (msg) => {
+    handleNoticeIncoming(msg);
+});
+
 // Listen for replies from agents
 bot.on('message', async (msg) => {
+    // 先处理通知来源（私聊/群聊/转发文本都走这里）
+    handleNoticeIncoming(msg);
+
     // Ignore commands
     if (typeof msg.text === 'string' && msg.text.startsWith('/')) {
         return;
@@ -779,7 +880,43 @@ bot.on('message', async (msg) => {
     }
 });
 
+function loadNoticeMessagesFromFile() {
+    try {
+        if (!fs.existsSync(NOTICE_TMP_FILE)) return;
+        const raw = fs.readFileSync(NOTICE_TMP_FILE, 'utf8');
+        if (!raw) return;
+
+        const parsed = JSON.parse(raw);
+        const items = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.items) ? parsed.items : []);
+        noticeMessages = items
+            .map(it => ({
+                text: String((it && it.text) || '').trim(),
+                ts: Number((it && it.ts) || Date.now())
+            }))
+            .filter(it => it.text)
+            .slice(-NOTICE_HISTORY_LIMIT);
+
+        if (DEBUG) console.log(`[NOTICE] loaded ${noticeMessages.length} items from tmp.json`);
+    } catch (e) {
+        console.error('[NOTICE] load tmp.json failed:', e && e.message ? e.message : e);
+        noticeMessages = [];
+    }
+}
+
+function saveNoticeMessagesToFile() {
+    try {
+        const payload = {
+            updatedAt: Date.now(),
+            items: noticeMessages.slice(-NOTICE_HISTORY_LIMIT)
+        };
+        fs.writeFileSync(NOTICE_TMP_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[NOTICE] save tmp.json failed:', e && e.message ? e.message : e);
+    }
+}
+
 initSupportAgents();
+loadNoticeMessagesFromFile();
 
 server.listen(3000, () => {
     console.log('Server is running on http://localhost:3000');

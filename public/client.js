@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const isMobile = () => window.innerWidth <= 768;
     const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+    const NOTICE_AGENT_ID = '__notice__';
 
     function getExternalContextFromUrl() {
         try {
@@ -138,6 +139,10 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error('请先选择客服');
             return;
         }
+        if (String(selectedAgentId) === NOTICE_AGENT_ID) {
+            console.error('通知信息为只读公告，无法发送消息');
+            return;
+        }
         if (input.value) {
             const message = input.value.trim();
             if (message) {
@@ -157,6 +162,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!blob) return;
         if (!selectedAgentName) {
             console.error('请先选择客服');
+            return;
+        }
+        if (String(selectedAgentId) === NOTICE_AGENT_ID) {
+            console.error('通知信息为只读公告，无法发送图片');
             return;
         }
         if (!/^image\//.test(blob.type || '')) {
@@ -240,6 +249,53 @@ document.addEventListener('DOMContentLoaded', () => {
 
     socket.on('error_message', (message) => {
         console.error(message);
+    });
+
+    socket.on('notice_messages', (items) => {
+        const list = Array.isArray(items) ? items : [];
+        messagesByAgent[NOTICE_AGENT_ID] = list.map(it => ({
+            sender: '通知信息',
+            text: String((it && it.text) || ''),
+            messageClass: 'agent-message',
+            ts: (it && it.ts) || Date.now(),
+            type: 'text',
+            imageDataUrl: '',
+            caption: ''
+        }));
+        saveSession();
+        if (String(selectedAgentId) === NOTICE_AGENT_ID) {
+            renderMessagesForSelectedAgent();
+        }
+    });
+
+    socket.on('notice_message', (item) => {
+        const text = String((item && item.text) || '').trim();
+        if (!text) return;
+        const ts = (item && item.ts) || Date.now();
+
+        if (!messagesByAgent[NOTICE_AGENT_ID]) messagesByAgent[NOTICE_AGENT_ID] = [];
+        const exists = messagesByAgent[NOTICE_AGENT_ID].some(m => m.ts === ts && m.text === text);
+        if (exists) return;
+
+        messagesByAgent[NOTICE_AGENT_ID].push({
+            sender: '通知信息',
+            text,
+            messageClass: 'agent-message',
+            ts,
+            type: 'text',
+            imageDataUrl: '',
+            caption: ''
+        });
+        saveSession();
+
+        if (String(selectedAgentId) === NOTICE_AGENT_ID) {
+            appendMessage('通知信息', text, 'agent-message', {
+                ts,
+                persist: false,
+                agentId: NOTICE_AGENT_ID
+            });
+            playNotify();
+        }
     });
 
     // --- 辅助函数 ---
