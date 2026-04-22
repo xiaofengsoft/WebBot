@@ -126,7 +126,8 @@ function initSupportAgents() {
         if (parts.length === 2) {
             const tgId = parts[0];
             const name = parts[1];
-            if (/^\d+$/.test(tgId)) {
+            // 支持个人/群组/超级群 ID（可为负数）
+            if (/^-?\d+$/.test(tgId)) {
                 supportAgents[tgId] = { name, chatId: Number(tgId) };
                 console.log(`Initialized support agent from config: ${name} (chatId: ${tgId})`);
             } else {
