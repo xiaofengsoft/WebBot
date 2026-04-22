@@ -22,6 +22,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let audioCtx = null;
     let canPlaySound = true;
     let externalContext = { createIp: '', vName: '', memberId: '' };
+    let defaultMessageText = '';
+    let defaultMessageShownByAgent = {}; // { [agentId]: shownMessageText }
 
     const isMobile = () => window.innerWidth <= 768;
 
@@ -98,6 +100,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 15000);
 
+    socket.on('config', (cfg) => {
+        defaultMessageText = String((cfg && cfg.defaultMessage) || '').trim();
+        maybeInjectDefaultMessage();
+    });
+
     socket.on('agent_selected', (agentName) => {
         selectedAgentName = agentName;
         showChatView();
@@ -108,6 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (selectedAgentId && lastRenderedAgentId !== selectedAgentId) {
             renderMessagesForSelectedAgent();
         }
+        maybeInjectDefaultMessage();
         const card = document.querySelector(`.agent-card[data-id="${selectedAgentId}"]`);
         if (card) {
             document.querySelectorAll('.agent-card.selected').forEach(el => el.classList.remove('selected'));
@@ -250,11 +258,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function maybeInjectDefaultMessage() {
+        const aid = selectedAgentId != null ? String(selectedAgentId) : '';
+        if (!aid || !defaultMessageText) return;
+        if (defaultMessageShownByAgent[aid] === defaultMessageText) return;
+
+        defaultMessageShownByAgent[aid] = defaultMessageText;
+        appendMessage(selectedAgentName || '客服', defaultMessageText, 'agent-message', {
+            ts: Date.now(),
+            persist: true,
+            agentId: aid
+        });
+        saveSession();
+    }
+
     function renderMessagesForSelectedAgent() {
         messagesDiv.innerHTML = '';
         const list = (selectedAgentId && messagesByAgent[String(selectedAgentId)]) || [];
         list.forEach(m => appendMessage(m.sender, m.text, m.messageClass, { persist: false, ts: m.ts, agentId: selectedAgentId }));
         lastRenderedAgentId = selectedAgentId;
+        maybeInjectDefaultMessage();
     }
 
     // --- 会话持久化 ---
@@ -264,7 +287,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function saveSession() {
         try {
-            const state = { selectedAgentId, selectedAgentName, messagesByAgent };
+            const state = { selectedAgentId, selectedAgentName, messagesByAgent, defaultMessageShownByAgent };
             localStorage.setItem(getStateKey(), JSON.stringify(state));
         } catch (e) {}
     }
@@ -284,6 +307,9 @@ document.addEventListener('DOMContentLoaded', () => {
             selectedAgentId = state.selectedAgentId || null;
             selectedAgentName = state.selectedAgentName || '';
             messagesByAgent = state.messagesByAgent && typeof state.messagesByAgent === 'object' ? state.messagesByAgent : {};
+            defaultMessageShownByAgent = state.defaultMessageShownByAgent && typeof state.defaultMessageShownByAgent === 'object'
+                ? state.defaultMessageShownByAgent
+                : {};
 
             if (selectedAgentId && socket.connected) {
                 showChatView();

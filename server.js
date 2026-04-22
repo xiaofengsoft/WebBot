@@ -15,6 +15,7 @@ if (!token) {
 // 保持 ADMIN_ID 为字符串类型，以避免大数字精度问题
 const ADMIN_ID = process.env.ADMIN_ID;
 const DEBUG = process.env.DEBUG == 'true';
+const PROXY_ADDR = process.env.PROXY_ADDR; // e.g. http://127.0.0.1:7890
 
 const app = express();
 const server = http.createServer(app);
@@ -22,7 +23,7 @@ const io = socketIo(server);
 const bot = new TelegramBot(token, {
     polling: true,
     request: DEBUG ?  {
-        proxy: 'http://127.0.0.1:7890'
+        proxy: PROXY_ADDR
     } : undefined
 });
 
@@ -115,6 +116,8 @@ app.use(express.static('public'));
 // --- Socket.IO Logic ---
 io.on('connection', (socket) => {
     console.log('New web client connected:', socket.id);
+    // Send config including DEFAULT_MESSAGE
+    socket.emit('config', { defaultMessage: process.env.DEFAULT_MESSAGE || '' });
 
     // Send the list of available agents to the new client
     socket.emit('update_agents', Object.values(supportAgents).map(agent => ({ id: agent.chatId, name: agent.name })));
