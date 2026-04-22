@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const socketIo = require('socket.io');
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
@@ -44,6 +45,27 @@ let knownUsersByUsername = {};
 let offlineQueuesByUser = {};
 // In-memory chat history per user-agent pair: `${userId}::${agentId}` -> [ { from: 'user'|'agent', name, text, ts } ]
 let historiesByUA = {};
+
+// 通过“客服chatId + 机器人发出的message_id”做路由，不再依赖可见标记
+let routeByReplyMessage = {}; // { `${chatId}:${messageId}`: { userId, sessionId, agentId, memberId, createIp, vName, displayId, ts } }
+let routeReplyKeyOrder = [];
+const ROUTE_CACHE_LIMIT = Number(process.env.ROUTE_CACHE_LIMIT || 5000);
+
+function rememberReplyRoute(chatId, messageId, routeInfo) {
+    if (!chatId || !messageId) return;
+    const key = `${chatId}:${messageId}`;
+    routeByReplyMessage[key] = routeInfo;
+    routeReplyKeyOrder.push(key);
+    if (routeReplyKeyOrder.length > ROUTE_CACHE_LIMIT) {
+        const oldKey = routeReplyKeyOrder.shift();
+        if (oldKey) delete routeByReplyMessage[oldKey];
+    }
+}
+
+function findReplyRoute(chatId, messageId) {
+    if (!chatId || !messageId) return null;
+    return routeByReplyMessage[`${chatId}:${messageId}`] || null;
+}
 
 function initSupportAgents() {
     const config = process.env.SUPPORT_TG_ID || '';
@@ -108,14 +130,96 @@ function buildHistorySnippet(userId, agentId, includeCount = 5, truncateEach = 2
     return lines.join('\n');
 }
 
+function downloadBuffer(fileUrl) {
+    return new Promise((resolve, reject) => {
+        const client = String(fileUrl).startsWith('https') ? https : http;
+        client.get(fileUrl, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                return resolve(downloadBuffer(res.headers.location));
+            }
+            if (res.statusCode !== 200) {
+                return reject(new Error(`Download failed: ${res.statusCode}`));
+            }
+            const chunks = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+        }).on('error', reject);
+    });
+}
+
+function parseImageDataUrl(dataUrl) {
+    const m = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/);
+    if (!m) return null;
+    return { mime: m[1], buffer: Buffer.from(m[2], 'base64') };
+}
+
+async function telegramPhotoToDataUrl(fileId) {
+    const link = await bot.getFileLink(fileId);
+    const buf = await downloadBuffer(link);
+    const ext = String(link).split('.').pop().toLowerCase();
+    const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+    return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
+function payloadToHistoryText(payload) {
+    if (!payload) return '';
+    if (payload.type === 'image') return `[图片]${payload.caption ? ` ${payload.caption}` : ''}`;
+    return String(payload.message || payload.text || '');
+}
+
+function emitAgentPayload(targetSocket, agent, payload, ts) {
+    if (payload && payload.type === 'image') {
+        targetSocket.emit('agent_message', {
+            agentId: agent.chatId,
+            agentName: agent.name,
+            type: 'image',
+            imageDataUrl: payload.imageDataUrl || '',
+            caption: payload.caption || '',
+            ts
+        });
+    } else {
+        targetSocket.emit('agent_message', {
+            agentId: agent.chatId,
+            agentName: agent.name,
+            message: (payload && (payload.message || payload.text)) || '',
+            ts
+        });
+    }
+}
+
+async function extractAgentPayload(msg) {
+    if (typeof msg.text === 'string' && msg.text.trim()) {
+        return { type: 'text', message: msg.text };
+    }
+
+    // TG 压缩图
+    if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+        const largest = msg.photo[msg.photo.length - 1];
+        const imageUrl = await bot.getFileLink(largest.file_id);
+        return { type: 'image', imageDataUrl: imageUrl, caption: msg.caption || '' };
+    }
+
+    // TG 原图/文件方式发送（document）
+    if (msg.document && /^image\//.test(String(msg.document.mime_type || ''))) {
+        const imageUrl = await bot.getFileLink(msg.document.file_id);
+        return { type: 'image', imageDataUrl: imageUrl, caption: msg.caption || '' };
+    }
+
+    return null;
+}
+
 function enqueueOffline(userId, payload) {
     if (!userId) return;
     if (!offlineQueuesByUser[userId]) offlineQueuesByUser[userId] = [];
     const ts = Date.now();
     offlineQueuesByUser[userId].push({ ...payload, ts });
-    // Record into history as agent message
     if (payload.agentId) {
-        pushHistory(userId, payload.agentId, { from: 'agent', name: payload.agentName, text: payload.message, ts });
+        pushHistory(userId, payload.agentId, {
+            from: 'agent',
+            name: payload.agentName,
+            text: payloadToHistoryText(payload),
+            ts
+        });
     }
 }
 
@@ -126,7 +230,23 @@ function flushOffline(userId) {
     const queue = offlineQueuesByUser[userId];
     if (!queue || queue.length === 0) return;
     queue.forEach(item => {
-        targetSocket.emit('agent_message', { agentId: item.agentId, agentName: item.agentName, message: item.message, ts: item.ts });
+        if (item.type === 'image') {
+            targetSocket.emit('agent_message', {
+                agentId: item.agentId,
+                agentName: item.agentName,
+                type: 'image',
+                imageDataUrl: item.imageDataUrl || '',
+                caption: item.caption || '',
+                ts: item.ts
+            });
+        } else {
+            targetSocket.emit('agent_message', {
+                agentId: item.agentId,
+                agentName: item.agentName,
+                message: item.message,
+                ts: item.ts
+            });
+        }
     });
     offlineQueuesByUser[userId] = [];
 }
@@ -197,36 +317,119 @@ io.on('connection', (socket) => {
             const createIp = String((data && (data.createIp || data.CreateIp || data.LzUrl || data.lzUrl)) || '').trim();
             const vName = String((data && (data.vName || data.VName)) || '').trim();
             const memberId = String((data && (data.id || data.Id)) || '').trim();
-
-            // marker 改为会员ID优先
-            const marker = memberId || (userId ? `user:${userId}` : `session_${sessionId}`);
+            const displayId = memberId || (userId ? `user:${userId}` : `session_${sessionId}`);
 
             if (userId && agentId) {
                 pushHistory(userId, agentId, { from: 'user', name: '用户', text: data.message, ts });
             }
 
             const historyBlock = (userId && agentId) ? buildHistorySnippet(userId, agentId, 5, 200) : '';
-            const paramBlock = [
-                `${createIp || '未提供'}`,
-                `${vName || '未提供'}`
-            ].join('——');
+            const historySection = historyBlock || `【${formatTs(ts)}】用户：${data.message}`;
 
-            let message = historyBlock
-                ? `来自网页用户（ID:${marker}）——${paramBlock}\n—— 最近会话（最多 5 条） ——\n${historyBlock}\n—— 回复本消息可直接发送给该用户 ——`
-                : `来自网页用户（ID:${marker}）——${paramBlock}\n—— 最近会话（最多 5 条） ——\n【${formatTs(ts)}】用户：${data.message}\n—— 回复本消息可直接发送给该用户 ——`;
-            // IMPORTANT: Append ASCII marker for reply routing compatibility
-            if (marker) {
-                message += `\n(${`user:${marker}`})`;
-            } else if (sessionId) {
-                message += `\n(${`session_${sessionId}`})`;
-            }
-            bot.sendMessage(agent.chatId, message);
-            console.log(`Forwarding message from marker=${marker} to agent ${agent.name}`);
+            const message = [
+                '💬 网页用户消息',
+                '━━━━━━━━━━━━━━',
+                `👤 站内用户ID：${userId || '未生成'}`,
+                `🆔 会员ID：${memberId || '未提供'}`,
+                `🌐 来源标识：${createIp || '未提供'}`,
+                `🏷️ 昵称/名称：${vName || '未提供'}`,
+                `🕒 时间：${formatTs(ts)}`,
+                '━━━━━━━━━━━━━━',
+                '📝 最近会话（最多 5 条）',
+                historySection,
+                '━━━━━━━━━━━━━━',
+                '请直接回复这条消息，系统会自动转发给用户。'
+            ].join('\n');
+
+            const routeInfo = {
+                userId: userId || '',
+                sessionId: userId ? '' : (sessionId || ''),
+                agentId,
+                memberId,
+                createIp,
+                vName,
+                displayId,
+                ts
+            };
+
+            bot.sendMessage(agent.chatId, message)
+                .then((sent) => {
+                    rememberReplyRoute(agent.chatId, sent && sent.message_id, routeInfo);
+                })
+                .catch((err) => {
+                    console.error('Failed to send message to agent:', err && err.message ? err.message : err);
+                });
+
+            console.log(`Forwarding message from displayId=${displayId} routeUser=${userId || '-'} to agent ${agent.name}`);
         } else {
             socket.emit('error_message', '请先选择客服。');
         }
     });
 
+    socket.on('web_image', (data) => {
+        const sessionId = socketToSession[socket.id];
+        const userId = socketToUser[socket.id];
+        const agentId = userId ? userChatsByUser[userId] : userChatsBySession[sessionId];
+        const agent = supportAgents[agentId];
+        if (!agent) {
+            socket.emit('error_message', '请先选择客服。');
+            return;
+        }
+
+        const parsed = parseImageDataUrl(data && data.imageDataUrl);
+        if (!parsed || !parsed.buffer || parsed.buffer.length === 0) {
+            socket.emit('error_message', '图片格式无效。');
+            return;
+        }
+        if (parsed.buffer.length > 8 * 1024 * 1024) {
+            socket.emit('error_message', '图片过大，请控制在 8MB 以内。');
+            return;
+        }
+
+        const ts = Date.now();
+        const createIp = String((data && (data.createIp || data.CreateIp || data.LzUrl || data.lzUrl)) || '').trim();
+        const vName = String((data && (data.vName || data.VName)) || '').trim();
+        const memberId = String((data && (data.id || data.Id)) || '').trim();
+        const caption = String((data && data.caption) || '').trim();
+        const displayId = memberId || (userId ? `user:${userId}` : `session_${sessionId}`);
+
+        if (userId && agentId) {
+            pushHistory(userId, agentId, { from: 'user', name: '用户', text: `[图片]${caption ? ` ${caption}` : ''}`, ts });
+        }
+
+        const tgCaption = [
+            '📷 网页用户图片',
+            `👤 站内用户ID：${userId || '未生成'}`,
+            `🆔 会员ID：${memberId || '未提供'}`,
+            `🌐 来源标识：${createIp || '未提供'}`,
+            `🏷️ 昵称/名称：${vName || '未提供'}`,
+            caption ? `✏️ 说明：${caption}` : null,
+            `🕒 时间：${formatTs(ts)}`,
+            '请直接回复此消息（文字或图片均可）。'
+        ].filter(Boolean).join('\n').slice(0, 1000);
+
+        const routeInfo = {
+            userId: userId || '',
+            sessionId: userId ? '' : (sessionId || ''),
+            agentId,
+            memberId,
+            createIp,
+            vName,
+            displayId,
+            ts
+        };
+
+        bot.sendPhoto(agent.chatId, parsed.buffer, { caption: tgCaption })
+            .then((sent) => {
+                rememberReplyRoute(agent.chatId, sent && sent.message_id, routeInfo);
+            })
+            .catch((err) => {
+                console.error('Failed to send image to agent:', err && err.message ? err.message : err);
+                socket.emit('error_message', '图片发送失败，请稍后重试。');
+            });
+    });
+
+    // Disconnect event
     socket.on('disconnect', () => {
         console.log('Web client disconnected:', socket.id);
         const sessionId = socketToSession[socket.id];
@@ -374,7 +577,7 @@ bot.onText(/\/whoami$/, (msg) => {
 });
 
 // Listen for replies from agents
-bot.on('message', (msg) => {
+bot.on('message', async (msg) => {
     // Ignore commands
     if (typeof msg.text === 'string' && msg.text.startsWith('/')) {
         return;
@@ -383,28 +586,77 @@ bot.on('message', (msg) => {
     // Check if the message is from a registered agent
     const agent = supportAgents[msg.chat.id];
     if (agent && msg.reply_to_message) {
-        // Extract the original user's socket ID from the message
+        let payload = null;
+        try {
+            payload = await extractAgentPayload(msg);
+        } catch (err) {
+            console.error('extractAgentPayload failed:', err && err.message ? err.message : err);
+            bot.sendMessage(msg.chat.id, '图片处理失败，请重试（建议直接发送压缩图片）。');
+            return;
+        }
+
+        if (!payload) {
+            bot.sendMessage(msg.chat.id, '仅支持回复文本或图片。');
+            return;
+        }
+
+        const replyRoute = findReplyRoute(msg.chat.id, msg.reply_to_message.message_id);
+        if (replyRoute) {
+            const routeUserId = replyRoute.userId;
+            const routeSessionId = replyRoute.sessionId;
+
+            if (routeUserId) {
+                const socketId = userToSocket[routeUserId];
+                const targetSocket = socketId && (io.of('/').sockets.get(socketId) || io.sockets.sockets.get(socketId));
+                const ts = msg && msg.date ? msg.date * 1000 : Date.now();
+                if (targetSocket) {
+                    emitAgentPayload(targetSocket, agent, payload, ts);
+                    pushHistory(routeUserId, agent.chatId, { from: 'agent', name: agent.name, text: payloadToHistoryText(payload), ts });
+                    bot.sendMessage(msg.chat.id, '已投递给用户。');
+                } else {
+                    enqueueOffline(routeUserId, { agentId: agent.chatId, agentName: agent.name, ...payload });
+                    bot.sendMessage(msg.chat.id, `用户当前不在线，消息已入队，将在其上线后自动发送（user:${routeUserId}）。`);
+                }
+                return;
+            }
+
+            if (routeSessionId) {
+                const socketId = sessionToSocket[routeSessionId];
+                const targetSocket = socketId && (io.of('/').sockets.get(socketId) || io.sockets.sockets.get(socketId));
+                const ts = msg && msg.date ? msg.date * 1000 : Date.now();
+                if (targetSocket) {
+                    emitAgentPayload(targetSocket, agent, payload, ts);
+                    bot.sendMessage(msg.chat.id, '已投递给用户。');
+                } else {
+                    bot.sendMessage(msg.chat.id, `用户当前不在线或暂时离开（session_${routeSessionId}）。`);
+                }
+                return;
+            }
+        }
+
+        // 兼容旧格式：历史消息仍支持可见标记解析
         const originalMessage = msg.reply_to_message.text || '';
-        // Prefer user marker
         let matchUser = originalMessage.match(/\(user:([^\)]+)\)/);
         if (matchUser && matchUser[1]) {
-            const userId = matchUser[1];
+            // 兼容历史错误标记：user:user:xxx
+            const rawUserId = matchUser[1];
+            const userId = rawUserId.startsWith('user:') ? rawUserId.slice(5) : rawUserId;
+
             const socketId = userToSocket[userId];
             const targetSocket = socketId && (io.of('/').sockets.get(socketId) || io.sockets.sockets.get(socketId));
             if (targetSocket) {
                 const ts = msg && msg.date ? msg.date * 1000 : Date.now();
                 targetSocket.emit('agent_message', { agentId: agent.chatId, agentName: agent.name, message: msg.text, ts });
-                // Record into history (live agent -> user)
                 pushHistory(userId, agent.chatId, { from: 'agent', name: agent.name, text: msg.text, ts });
                 console.log(`Forwarding reply from agent ${agent.name} to user ${userId}`);
                 bot.sendMessage(msg.chat.id, '已投递给用户。');
             } else {
-                // Queue offline message and notify agent
                 enqueueOffline(userId, { agentId: agent.chatId, agentName: agent.name, message: msg.text });
                 bot.sendMessage(msg.chat.id, `用户当前不在线，消息已入队，将在其上线后自动发送（user:${userId}）。`);
             }
             return;
         }
+
         // Fallback to session marker
         let match = originalMessage.match(/\(session_([\w-]+)\)/);
         const isSession = Boolean(match && match[1]);

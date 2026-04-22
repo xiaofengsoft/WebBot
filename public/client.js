@@ -13,6 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const agentAvatarEl = document.getElementById('agent-avatar');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
+    const sendImageBtn = document.getElementById('send-image-btn');
+    const imageInput = document.getElementById('image-input');
 
     let selectedAgentName = '';
     let selectedAgentId = null;
@@ -26,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let defaultMessageShownByAgent = {}; // { [agentId]: shownMessageText }
 
     const isMobile = () => window.innerWidth <= 768;
+    const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
     function getExternalContextFromUrl() {
         try {
@@ -150,9 +153,88 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    function sendImageBlob(blob) {
+        if (!blob) return;
+        if (!selectedAgentName) {
+            console.error('请先选择客服');
+            return;
+        }
+        if (!/^image\//.test(blob.type || '')) {
+            console.error('仅支持图片文件');
+            return;
+        }
+        if (blob.size > MAX_IMAGE_SIZE) {
+            console.error('图片过大，建议小于 5MB');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = () => {
+            const imageDataUrl = String(reader.result || '');
+            const caption = (input.value || '').trim();
+
+            socket.emit('web_image', {
+                imageDataUrl,
+                caption,
+                createIp: externalContext.createIp,
+                vName: externalContext.vName,
+                id: externalContext.memberId
+            });
+
+            appendMessage('我', caption || '[图片]', 'user-message', {
+                ts: Date.now(),
+                persist: true,
+                messageType: 'image',
+                imageDataUrl,
+                caption
+            });
+
+            input.value = '';
+        };
+        reader.readAsDataURL(blob);
+    }
+
+    if (sendImageBtn && imageInput) {
+        sendImageBtn.addEventListener('click', () => imageInput.click());
+        imageInput.addEventListener('change', () => {
+            const file = imageInput.files && imageInput.files[0];
+            if (file) sendImageBlob(file);
+            imageInput.value = '';
+        });
+    }
+
+    // Ctrl+V 粘贴截图直接发送（聊天窗口可见时生效）
+    document.addEventListener('paste', (e) => {
+        if (!selectedAgentName) return;
+        if (chatWindowDiv.classList.contains('hidden')) return;
+
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items || !items.length) return;
+
+        const imgItem = Array.from(items).find(it => it.type && it.type.startsWith('image/'));
+        if (!imgItem) return;
+
+        const blob = imgItem.getAsFile();
+        if (!blob) return;
+
+        e.preventDefault();
+        sendImageBlob(blob);
+    });
+
     socket.on('agent_message', (data) => {
         const aid = (data && data.agentId != null) ? String(data.agentId) : selectedAgentId;
-        appendMessage(data.agentName, data.message, 'agent-message', { ts: data.ts, persist: true, agentId: aid });
+        if (data && data.type === 'image') {
+            appendMessage(data.agentName, data.caption || '[图片]', 'agent-message', {
+                ts: data.ts,
+                persist: true,
+                agentId: aid,
+                messageType: 'image',
+                imageDataUrl: data.imageDataUrl || '',
+                caption: data.caption || ''
+            });
+        } else {
+            appendMessage(data.agentName, data.message, 'agent-message', { ts: data.ts, persist: true, agentId: aid });
+        }
         playNotify();
     });
 
@@ -231,14 +313,31 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) { return ''; }
     }
 
-    function appendMessage(sender, text, messageClass, opts = { persist: true, ts: null, agentId: null }) {
+    function escapeHtml(s) {
+        return String(s || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function appendMessage(sender, text, messageClass, opts = { persist: true, ts: null, agentId: null, messageType: 'text', imageDataUrl: '', caption: '' }) {
         const belongAgentId = (opts && opts.agentId != null) ? String(opts.agentId) : selectedAgentId;
-        
+        const messageType = (opts && opts.messageType) || 'text';
+        const caption = (opts && opts.caption) || '';
+
         if (opts && opts.persist) {
             const aid = belongAgentId;
             if (!aid) return;
             if (!messagesByAgent[aid]) messagesByAgent[aid] = [];
-            messagesByAgent[aid].push({ sender, text, messageClass, ts: opts.ts || Date.now() });
+            messagesByAgent[aid].push({
+                sender,
+                text,
+                messageClass,
+                ts: opts.ts || Date.now(),
+                type: messageType,
+                imageDataUrl: (opts && opts.imageDataUrl) || '',
+                caption
+            });
             saveSession();
         }
 
@@ -246,13 +345,26 @@ document.addEventListener('DOMContentLoaded', () => {
             const messageElement = document.createElement('div');
             messageElement.className = `message ${messageClass}`;
             const time = formatTime(opts.ts || Date.now());
-            // Sanitize text before inserting into innerHTML to prevent XSS
-            const sanitizedText = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
-            messageElement.innerHTML = `
-                <div class="sender">${sender}</div>
-                <div class="text">${sanitizedText}</div>
-                <div class="meta">${time}</div>
-            `;
+
+            if (messageType === 'image') {
+                const safeCaption = escapeHtml(caption || '');
+                const rawSrc = String((opts && opts.imageDataUrl) || '').trim();
+                const safeSrc = (/^data:image\//i.test(rawSrc) || /^https?:\/\//i.test(rawSrc)) ? rawSrc : '';
+                messageElement.innerHTML = `
+                    <div class="sender">${escapeHtml(sender)}</div>
+                    ${safeSrc ? `<div class="text"><img src="${safeSrc}" alt="image" style="max-width:220px;border-radius:8px;" /></div>` : '<div class="text">[图片]</div>'}
+                    ${safeCaption ? `<div class="text">${safeCaption}</div>` : ''}
+                    <div class="meta">${time}</div>
+                `;
+            } else {
+                const sanitizedText = escapeHtml(text);
+                messageElement.innerHTML = `
+                    <div class="sender">${escapeHtml(sender)}</div>
+                    <div class="text">${sanitizedText}</div>
+                    <div class="meta">${time}</div>
+                `;
+            }
+
             messagesDiv.appendChild(messageElement);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
@@ -275,7 +387,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderMessagesForSelectedAgent() {
         messagesDiv.innerHTML = '';
         const list = (selectedAgentId && messagesByAgent[String(selectedAgentId)]) || [];
-        list.forEach(m => appendMessage(m.sender, m.text, m.messageClass, { persist: false, ts: m.ts, agentId: selectedAgentId }));
+        list.forEach(m => appendMessage(m.sender, m.text, m.messageClass, {
+            persist: false,
+            ts: m.ts,
+            agentId: selectedAgentId,
+            messageType: m.type || 'text',
+            imageDataUrl: m.imageDataUrl || '',
+            caption: m.caption || ''
+        }));
         lastRenderedAgentId = selectedAgentId;
         maybeInjectDefaultMessage();
     }
